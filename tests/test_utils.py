@@ -1,12 +1,19 @@
-import io
+from __future__ import annotations
+
 import json
 import os
+import sys
 from collections import namedtuple
+from pathlib import Path
+from textwrap import dedent
 
 import pytest
 
+from dynaconf import add_converter
 from dynaconf import default_settings
+from dynaconf import Dynaconf
 from dynaconf.loaders.json_loader import DynaconfEncoder
+from dynaconf.utils import build_env_list
 from dynaconf.utils import ensure_a_list
 from dynaconf.utils import extract_json_objects
 from dynaconf.utils import isnamedtupleinstance
@@ -17,6 +24,7 @@ from dynaconf.utils import trimmed_split
 from dynaconf.utils import upperfy
 from dynaconf.utils.files import find_file
 from dynaconf.utils.files import get_local_filename
+from dynaconf.utils.parse_conf import boolean_fix
 from dynaconf.utils.parse_conf import evaluate_lazy_format
 from dynaconf.utils.parse_conf import Formatters
 from dynaconf.utils.parse_conf import Lazy
@@ -53,7 +61,7 @@ def test_unparse():
 
 
 def test_cast_bool(settings):
-    """Covers https://github.com/rochacbruno/dynaconf/issues/14"""
+    """Covers https://github.com/dynaconf/dynaconf/issues/14"""
     assert parse_conf_data(False, box_settings=settings) is False
     assert settings.get("SIMPLE_BOOL", cast="@bool") is False
 
@@ -82,10 +90,16 @@ def test_find_file(tmpdir):
     child4 = dirs[-1]
 
     assert find_file("file-does-not-exist") == ""
+    assert find_file("/abs-file-does-not-exist") == ""
+
+    for _dir in dirs:
+        # search for abspath return the same path
+        assert os.path.isabs(_dir)
+        assert find_file(_dir) == _dir
 
     # now place a .env file a few levels up and make sure it's found
     filename = os.path.join(str(child4), ".env")
-    with io.open(
+    with open(
         filename, "w", encoding=default_settings.ENCODING_FOR_DYNACONF
     ) as f:
         f.write("TEST=test\n")
@@ -98,6 +112,83 @@ def test_find_file(tmpdir):
     ) == os.path.join(str(tmpdir), ".env")
 
 
+def test_casting_str(settings):
+    res = parse_conf_data("@str 7")
+    assert isinstance(res, str) and res == "7"
+
+    settings.set("value", 7)
+    res = parse_conf_data("@str @jinja {{ this.value }}")(settings)
+    assert isinstance(res, str) and res == "7"
+
+    res = parse_conf_data("@str @format {this.value}")(settings)
+    assert isinstance(res, str) and res == "7"
+
+
+def test_casting_int(settings):
+    res = parse_conf_data("@int 2")
+    assert isinstance(res, int) and res == 2
+
+    settings.set("value", 2)
+    res = parse_conf_data("@int @jinja {{ this.value }}")(settings)
+    assert isinstance(res, int) and res == 2
+
+    res = parse_conf_data("@int @format {this.value}")(settings)
+    assert isinstance(res, int) and res == 2
+
+
+def test_casting_float(settings):
+    res = parse_conf_data("@float 0.3")
+    assert isinstance(res, float) and abs(res - 0.3) < 1e-6
+
+    settings.set("value", 0.3)
+    res = parse_conf_data("@float @jinja {{ this.value }}")(settings)
+    assert isinstance(res, float) and abs(res - 0.3) < 1e-6
+
+    res = parse_conf_data("@float @format {this.value}")(settings)
+    assert isinstance(res, float) and abs(res - 0.3) < 1e-6
+
+
+def test_casting_bool(settings):
+    res = parse_conf_data("@bool true")
+    assert isinstance(res, bool) and res is True
+
+    settings.set("value", "true")
+    res = parse_conf_data("@bool @jinja {{ this.value }}")(settings)
+    assert isinstance(res, bool) and res is True
+
+    settings.set("value", "false")
+    res = parse_conf_data("@bool @format {this.value}")(settings)
+    assert isinstance(res, bool) and res is False
+
+
+def test_casting_json(settings):
+    res = parse_conf_data("""@json {"FOO": "bar"}""")
+    assert isinstance(res, dict)
+    assert "FOO" in res and "bar" in res.values()
+
+    # Test how single quotes cases are handled.
+    # When jinja uses `attr` to render a json string,
+    # it may convert double quotes to single quotes.
+    settings.set("value", "{'FOO': 'bar'}")
+    res = parse_conf_data("@json @jinja {{ this.value }}")(settings)
+    assert isinstance(res, dict)
+    assert "FOO" in res and "bar" in res.values()
+
+    res = parse_conf_data("@json @format {this.value}")(settings)
+    assert isinstance(res, dict)
+    assert "FOO" in res and "bar" in res.values()
+
+    # Test jinja rendering a dict
+    settings.set("value", "OPTION1")
+    settings.set("OPTION1", {"bar": 1})
+    settings.set("OPTION2", {"bar": 2})
+    res = parse_conf_data("@jinja {{ this|attr(this.value) }}")(settings)
+    assert isinstance(res, str)
+    res = parse_conf_data("@json @jinja {{ this|attr(this.value) }}")(settings)
+    assert isinstance(res, dict)
+    assert "bar" in res and res["bar"] == 1
+
+
 def test_disable_cast(monkeypatch):
     # this casts for int
     assert parse_conf_data("@int 42", box_settings={}) == 42
@@ -105,6 +196,13 @@ def test_disable_cast(monkeypatch):
     with monkeypatch.context() as m:
         m.setenv("AUTO_CAST_FOR_DYNACONF", "off")
         assert parse_conf_data("@int 42", box_settings={}) == "@int 42"
+
+
+def test_disable_cast_on_instance():
+    settings = Dynaconf(auto_cast=False, environments=True)
+    assert settings.auto_cast_for_dynaconf is False
+    settings.set("SIMPLE_INT", "@int 42")
+    assert settings.get("SIMPLE_INT") == "@int 42"
 
 
 def test_tomlfy(settings):
@@ -145,7 +243,7 @@ def test_missing_sentinel():
     assert missing == missing
 
     # new instances of Missing should be equal to each other due to
-    # explicit __eq__ implmentation check for isinstance.
+    # explicit __eq__ implementation check for isinstance.
     assert missing == Missing()
 
     # The sentinel should not be equal to None, True, or False
@@ -153,7 +251,8 @@ def test_missing_sentinel():
     assert missing is not True
     assert missing is not False
 
-    # But the explict typecasting of missing to a bool should evaluate to False
+    # But the explicit typecasting of missing to a bool should evaluate to
+    # False
     assert bool(missing) is False
 
     assert str(missing) == "<dynaconf.missing>"
@@ -163,7 +262,6 @@ def test_meta_values(settings):
     reset = parse_conf_data(
         "@reset [1, 2]", tomlfy=True, box_settings=settings
     )
-    # @reset is DEPRECATED in v3.0.0 but kept for backwards compatibility
     assert reset.value == [1, 2]
     assert reset._dynaconf_reset is True
     assert "Reset([1, 2])" in repr(reset)
@@ -294,13 +392,16 @@ def test_lazy_format_class():
 def test_evaluate_lazy_format_decorator(settings):
     class Settings:
         FOO = "foo"
+        AUTO_CAST_FOR_DYNACONF = True
 
         @evaluate_lazy_format
-        def get(self):
+        def get(self, key, default=None):
+            if key.endswith("_FOR_DYNACONF"):
+                return getattr(self, key)
             return parse_conf_data("@format {this.FOO}/bar", box_settings=self)
 
     settings = Settings()
-    assert settings.get() == "foo/bar"
+    assert settings.get("foo") == "foo/bar"
 
 
 def test_lazy_format_on_settings(settings):
@@ -322,14 +423,18 @@ def test_evaluate_lazy_format_decorator_jinja(settings):
     class Settings:
         FOO = "foo"
 
+        AUTO_CAST_FOR_DYNACONF = True
+
         @evaluate_lazy_format
-        def get(self):
+        def get(self, key, default=None):
+            if key.endswith("_FOR_DYNACONF"):
+                return getattr(self, key)
             return parse_conf_data(
                 "@jinja {{this.FOO}}/bar", box_settings=settings
             )
 
     settings = Settings()
-    assert settings.get() == "foo/bar"
+    assert settings.get("foo") == "foo/bar"
 
 
 def test_lazy_format_on_settings_jinja(settings):
@@ -367,3 +472,50 @@ def test_extract_json():
     assert list(extract_json_objects('foo bar {"a": 1}')) == [{"a": 1}]
     assert list(extract_json_objects("foo bar {'a': 2{")) == []
     assert list(extract_json_objects('{{{"x": {}}}}')) == [{"x": {}}]
+
+
+def test_env_list():
+    class Obj(dict):
+        @property
+        def current_env(self):
+            return "other"
+
+    assert build_env_list(Obj(), env="OTHER") == [
+        "default",
+        "dynaconf",
+        "other",
+        "global",
+    ]
+
+
+def create_file(filename: str, data: str) -> str:
+    with open(filename, "w", encoding="utf-8") as f:
+        f.write(dedent(data))
+    return filename
+
+
+@pytest.mark.skipif(
+    sys.platform.startswith("win"),
+    reason="Doesn't work on windows due to backslash decoding errors",
+)
+def test_add_converter_path_example(tmp_path):
+    """Assert add_converter Path example works"""
+    add_converter("path", Path)
+    fn = create_file(
+        tmp_path / "settings.yaml",
+        f"""\
+        my_path: "@path {Path.home()}"
+        """,
+    )
+    settings = Dynaconf(settings_file=fn)
+    assert isinstance(settings.my_path, Path)
+
+
+def test_boolean_fix():
+    """Assert boolean fix works"""
+    assert boolean_fix("True") == "true"
+    assert boolean_fix("False") == "false"
+    assert boolean_fix("NotOnlyTrue") == "NotOnlyTrue"
+    assert boolean_fix("TrueNotOnly") == "TrueNotOnly"
+    assert boolean_fix("FalseNotOnly") == "FalseNotOnly"
+    assert boolean_fix("NotOnlyFalse") == "NotOnlyFalse"

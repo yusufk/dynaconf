@@ -2,6 +2,7 @@
 """
 Implement basic assertions to be used in assertion action
 """
+from __future__ import annotations
 
 
 def eq(value, other):
@@ -75,10 +76,15 @@ def len_min(value, other):
 
 
 def len_max(value, other):
-    """Maximum lenght"""
+    """Maximum length"""
     return len(value) <= other
 
 
 def startswith(value, term):
     """returns value.startswith(term) result"""
     return value.startswith(term)
+
+
+def endswith(value, term):
+    """returns value.endswith(term) result"""
+    return value.endswith(term)

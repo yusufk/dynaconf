@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 import os
 import re
@@ -9,7 +11,9 @@ from dynaconf.utils import isnamedtupleinstance
 from dynaconf.utils import multi_replace
 from dynaconf.utils import recursively_evaluate_lazy_format
 from dynaconf.utils.boxing import DynaBox
+from dynaconf.utils.functional import empty
 from dynaconf.vendor import toml
+from dynaconf.vendor import tomllib
 
 try:
     from jinja2 import Environment
@@ -26,6 +30,10 @@ false_values = ("f", "false", "disabled", "0", "off", "no", "False", "")
 
 KV_PATTERN = re.compile(r"([a-zA-Z0-9 ]*=[a-zA-Z0-9\- :]*)")
 """matches `a=b, c=d, e=f` used on `VALUE='@merge foo=bar'` variables."""
+
+
+class DynaconfFormatError(Exception):
+    """Error to raise when formatting a lazy variable fails"""
 
 
 class DynaconfParseError(Exception):
@@ -80,6 +88,9 @@ class Merge(MetaValue):
     _dynaconf_merge = True
 
     def __init__(self, value, box_settings, unique=False):
+        if unique:
+            self._dynaconf_merge_unique = True
+
         self.box_settings = box_settings
 
         self.value = parse_conf_data(
@@ -136,7 +147,14 @@ class BaseFormatter:
         self.token = token
 
     def __call__(self, value, **context):
-        return self.function(value, **context)
+        try:
+            return self.function(value, **context)
+        except (KeyError, AttributeError) as exc:
+            # A template like `{this.KEY}` failed with AttributeError
+            # Or KeyError in the case of `{env[KEY]}`
+            raise DynaconfFormatError(
+                f"Dynaconf can't interpolate variable because {exc}"
+            ) from exc
 
     def __str__(self):
         return str(self.token)
@@ -162,19 +180,26 @@ class Lazy:
 
     _dynaconf_lazy_format = True
 
-    def __init__(self, value, formatter=Formatters.python_formatter):
+    def __init__(
+        self, value=empty, formatter=Formatters.python_formatter, casting=None
+    ):
         self.value = value
         self.formatter = formatter
+        self.casting = casting
 
     @property
     def context(self):
         """Builds a context for formatting."""
         return {"env": os.environ, "this": self.settings}
 
-    def __call__(self, settings):
+    def __call__(self, settings, validator_object=None):
         """LazyValue triggers format lazily."""
         self.settings = settings
-        return self.formatter(self.value, **self.context)
+        self.context["_validator_object"] = validator_object
+        result = self.formatter(self.value, **self.context)
+        if self.casting is not None:
+            result = self.casting(result)
+        return result
 
     def __str__(self):
         """Gives string representation for the object."""
@@ -187,6 +212,11 @@ class Lazy:
     def _dynaconf_encode(self):
         """Encodes this object values to be serializable to json"""
         return f"@{self.formatter} {self.value}"
+
+    def set_casting(self, casting):
+        """Set the casting and return the instance."""
+        self.casting = casting
+        return self
 
 
 def try_to_encode(value, callback=str):
@@ -210,11 +240,25 @@ def evaluate_lazy_format(f):
 
 
 converters = {
-    "@str": str,
-    "@int": int,
-    "@float": float,
-    "@bool": lambda value: str(value).lower() in true_values,
-    "@json": json.loads,
+    "@str": lambda value: value.set_casting(str)
+    if isinstance(value, Lazy)
+    else str(value),
+    "@int": lambda value: value.set_casting(int)
+    if isinstance(value, Lazy)
+    else int(value),
+    "@float": lambda value: value.set_casting(float)
+    if isinstance(value, Lazy)
+    else float(value),
+    "@bool": lambda value: value.set_casting(
+        lambda x: str(x).lower() in true_values
+    )
+    if isinstance(value, Lazy)
+    else str(value).lower() in true_values,
+    "@json": lambda value: value.set_casting(
+        lambda x: json.loads(x.replace("'", '"'))
+    )
+    if isinstance(value, Lazy)
+    else json.loads(value),
     "@format": lambda value: Lazy(value),
     "@jinja": lambda value: Lazy(value, formatter=Formatters.jinja_formatter),
     # Meta Values to trigger pre assignment actions
@@ -230,10 +274,16 @@ converters = {
     "@comment": lambda value: None,
     "@null": lambda value: None,
     "@none": lambda value: None,
+    "@empty": lambda value: empty,
 }
 
 
-def get_converter(converter_key, value, box_settings):
+def apply_converter(converter_key, value, box_settings):
+    """
+    Get converter and apply it to @value.
+
+    Lazy converters will return Lazy objects for later evaluation.
+    """
     converter = converters[converter_key]
     try:
         converted_value = converter(value, box_settings=box_settings)
@@ -242,12 +292,40 @@ def get_converter(converter_key, value, box_settings):
     return converted_value
 
 
+def add_converter(converter_key, func):
+    """Adds a new converter to the converters dict"""
+    if not converter_key.startswith("@"):
+        converter_key = f"@{converter_key}"
+
+    converters[converter_key] = wraps(func)(
+        lambda value: value.set_casting(func)
+        if isinstance(value, Lazy)
+        else Lazy(
+            value,
+            casting=func,
+            formatter=BaseFormatter(lambda x, **_: x, converter_key),
+        )
+    )
+
+
 def parse_with_toml(data):
     """Uses TOML syntax to parse data"""
-    try:
-        return toml.loads(f"key={data}")["key"]
-    except (toml.TomlDecodeError, KeyError):
-        return data
+    try:  # try tomllib first
+        try:
+            return tomllib.loads(f"key={data}")["key"]
+        except (tomllib.TOMLDecodeError, KeyError):
+            return data
+    except UnicodeDecodeError:  # pragma: no cover
+        # fallback to toml (TBR in 4.0.0)
+        try:
+            return toml.loads(f"key={data}")["key"]
+        except (toml.TomlDecodeError, KeyError):
+            return data
+        warnings.warn(
+            "TOML files should have only UTF-8 encoded characters. "
+            "starting on 4.0.0 dynaconf will stop allowing invalid chars.",
+            DeprecationWarning,
+        )
 
 
 def _parse_conf_data(data, tomlfy=False, box_settings=None):
@@ -265,8 +343,12 @@ def _parse_conf_data(data, tomlfy=False, box_settings=None):
     # not enforced to not break backwards compatibility with custom loaders
     box_settings = box_settings or {}
 
-    cast_toggler = os.environ.get("AUTO_CAST_FOR_DYNACONF", "true").lower()
-    castenabled = cast_toggler not in false_values
+    castenabled = box_settings.get("AUTO_CAST_FOR_DYNACONF", empty)
+    if castenabled is empty:
+        castenabled = (
+            os.environ.get("AUTO_CAST_FOR_DYNACONF", "true").lower()
+            not in false_values
+        )
 
     if (
         castenabled
@@ -274,10 +356,23 @@ def _parse_conf_data(data, tomlfy=False, box_settings=None):
         and isinstance(data, str)
         and data.startswith(tuple(converters.keys()))
     ):
-        parts = data.partition(" ")
-        converter_key = parts[0]
-        value = parts[-1]
-        value = get_converter(converter_key, value, box_settings)
+        # Check combination token is used
+        comb_token = re.match(
+            f"^({'|'.join(converters.keys())}) @(jinja|format)",
+            data,
+        )
+        if comb_token:
+            tokens = comb_token.group(0)
+            converter_key_list = tokens.split(" ")
+            value = data.replace(tokens, "").strip()
+        else:
+            parts = data.partition(" ")
+            converter_key_list = [parts[0]]
+            value = parts[-1]
+
+        # Parse the converters iteratively
+        for converter_key in converter_key_list[::-1]:
+            value = apply_converter(converter_key, value, box_settings)
     else:
         value = parse_with_toml(data) if tomlfy else data
 
@@ -288,8 +383,13 @@ def _parse_conf_data(data, tomlfy=False, box_settings=None):
 
 
 def parse_conf_data(data, tomlfy=False, box_settings=None):
+    """
+    Apply parsing tokens recursively and return transformed data.
 
-    # fix for https://github.com/rochacbruno/dynaconf/issues/595
+    Strings with lazy parser (e.g, @format) will become Lazy objects.
+    """
+
+    # fix for https://github.com/dynaconf/dynaconf/issues/595
     if isnamedtupleinstance(data):
         return data
 
@@ -297,14 +397,22 @@ def parse_conf_data(data, tomlfy=False, box_settings=None):
     box_settings = box_settings or {}
 
     if isinstance(data, (tuple, list)):
-
         # recursively parse each sequence item
         return [
             parse_conf_data(item, tomlfy=tomlfy, box_settings=box_settings)
             for item in data
         ]
 
-    if isinstance(data, (dict, DynaBox)):
+    if isinstance(data, DynaBox):
+        # recursively parse inner dict items
+        _parsed = DynaBox({}, box_settings=box_settings)
+        for k, v in data._safe_items():
+            _parsed[k] = parse_conf_data(
+                v, tomlfy=tomlfy, box_settings=box_settings
+            )
+        return _parsed
+
+    if isinstance(data, dict):
         # recursively parse inner dict items
         _parsed = {}
         for k, v in data.items():
@@ -336,4 +444,18 @@ def unparse_conf_data(value):
     if value is None:
         return "@none "
 
+    return value
+
+
+def boolean_fix(value: str | None):
+    """Gets a value like `True/False` and turns to `true/false`
+    This function exists because of issue #976
+    Toml parser casts booleans from true/false lower case
+    however envvars are usually exportes as True/False capitalized
+    by mistake, this helper fixes it for envvars only.
+
+    Assume envvars are always str.
+    """
+    if value and value.strip() in ("True", "False"):
+        return value.lower()
     return value

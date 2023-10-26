@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import copy
 import operator
 
@@ -31,6 +33,7 @@ class LazyObject:
     # Avoid infinite recursion when tracing __init__.
     _wrapped = None
     _kwargs = None
+    _django_override = False
 
     def __init__(self):
         # Note: if a subclass overrides __init__(), it will likely need to
@@ -40,7 +43,12 @@ class LazyObject:
     __getattr__ = new_method_proxy(getattr)
 
     def __setattr__(self, name, value):
-        if name in ["_wrapped", "_kwargs", "_warn_dynaconf_global_settings"]:
+        if name in [
+            "_wrapped",
+            "_kwargs",
+            "_warn_dynaconf_global_settings",
+            "_wrapper_class",
+        ]:
             # Assign to __dict__ to avoid infinite __setattr__ loops.
             self.__dict__[name] = value
         else:

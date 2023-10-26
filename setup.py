@@ -1,17 +1,15 @@
-import io
-import os
-import sys
+from __future__ import annotations
 
-try:
-    from setuptools import setup, find_packages
-except ImportError:
-    from distutils.core import setup, find_packages
+import os
+
+from setuptools import find_packages
+from setuptools import setup
 
 
 def read(*names, **kwargs):
     """Read a file."""
     content = ""
-    with io.open(
+    with open(
         os.path.join(os.path.dirname(__file__), *names),
         encoding=kwargs.get("encoding", "utf8"),
     ) as open_file:
@@ -19,11 +17,33 @@ def read(*names, **kwargs):
     return content
 
 
+test_requirements = [
+    "pytest",
+    "pytest-cov",
+    "pytest-xdist",
+    "pytest-mock",
+    "flake8",
+    "pep8-naming",
+    "flake8-debugger",
+    "flake8-print",
+    "flake8-todo",
+    "radon",
+    "flask>=0.12",
+    "django",
+    "python-dotenv",
+    "toml",
+    "redis",
+    "hvac>=1.1.0",
+    "configobj",
+]
+
+
 setup(
     name="dynaconf",
     version=read("dynaconf", "VERSION"),
-    url="https://github.com/rochacbruno/dynaconf",
+    url="https://github.com/dynaconf/dynaconf",
     license="MIT",
+    license_files=["LICENSE", "vendor_licenses/*"],
     author="Bruno Rocha",
     author_email="rochacbruno@gmail.com",
     description="The dynamic configurator for your Python Project",
@@ -33,8 +53,8 @@ setup(
         exclude=[
             "tests",
             "tests.*",
-            "example",
-            "example.*",
+            "tests_functional",
+            "tests_functional.*",
             "docs",
             "legacy_docs",
             "legacy_docs.*",
@@ -50,22 +70,7 @@ setup(
     include_package_data=True,
     zip_safe=False,
     platforms="any",
-    install_requires=["typing; python_version<'3.5'"],
-    tests_require=[
-        "pytest",
-        "pytest-cov",
-        "pytest-xdist",
-        "flake8",
-        "pep8-naming",
-        "flake8-debugger",
-        "flake8-print",
-        "flake8-todo",
-        "radon",
-        "flask>=0.12",
-        "python-dotenv",
-        "toml",
-        "codecov",
-    ],
+    tests_require=test_requirements,
     extras_require={
         "redis": ["redis"],
         "vault": ["hvac"],
@@ -74,11 +79,11 @@ setup(
         "ini": ["configobj"],
         "configobj": ["configobj"],
         "all": ["redis", "ruamel.yaml", "configobj", "hvac"],
+        "test": test_requirements,
     },
+    python_requires=">=3.8",
     entry_points={"console_scripts": ["dynaconf=dynaconf.cli:main"]},
-    setup_requires=["setuptools>=38.6.0"]
-    if sys.version_info >= (3, 6, 0)
-    else [],
+    setup_requires=["setuptools>=38.6.0"],
     classifiers=[
         "Development Status :: 5 - Production/Stable",
         "Framework :: Django",
@@ -90,10 +95,10 @@ setup(
         "Programming Language :: Python",
         "Programming Language :: Python :: 3",
         "Programming Language :: Python :: 3 :: Only",
-        "Programming Language :: Python :: 3.6",
-        "Programming Language :: Python :: 3.7",
         "Programming Language :: Python :: 3.8",
         "Programming Language :: Python :: 3.9",
+        "Programming Language :: Python :: 3.10",
+        "Programming Language :: Python :: 3.11",
         "Topic :: Utilities",
         "Topic :: Software Development :: Libraries",
         "Topic :: Software Development :: Libraries :: Python Modules",

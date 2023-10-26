@@ -13,33 +13,35 @@ The `$ dynaconf -i config.settings` cli provides some useful commands
 
 ### dynaconf --help
 
-```
+```bash
 Usage: dynaconf [OPTIONS] COMMAND [ARGS]...
 
   Dynaconf - Command Line Interface
 
+  Documentation: https://dynaconf.com/
+
 Options:
-  --version  Show dynaconf version
-  --docs     Open documentation in browser
-  --banner   Show awesome banner
+  --version            Show dynaconf version
+  --docs               Open documentation in browser
+  --banner             Show awesome banner
   -i, --instance TEXT  Custom instance of LazySettings
-  --help     Show this message and exit.
+  --help               Show this message and exit.
 
 Commands:
-  init      Inits a dynaconf project By default it...
-  list      Lists all defined config values
-  write     Writes data to specific source
-  validate  Validates based on dynaconf_validators.toml file
+  get       Returns the raw value for a settings key.
+  init      Inits a dynaconf project.
+  inspect   Inspect the loading history of the given settings instance.
+  list      Lists user defined settings or all (including internal configs).
+  validate  Validates Dynaconf settings based on provided rules.
+  write     Writes data to specific source.
 ```
 
 ### dynaconf init
 
 Use init to easily configure your application configuration, once dynaconf is installed go to the root directory of your application and run:
 
-creates settings files in current directory
-
 ```
-$ dynaconf -i init -v key=value -v foo=bar -s token=1234 -e production
+$ dynaconf init -v key=value -v foo=bar -s token=1234
 ```
 
 The above command will create in the current directory
@@ -47,11 +49,6 @@ The above command will create in the current directory
 `settings.toml`
 
 ```ini
-[default]
-KEY = "default"
-FOO = "default"
-
-[production]
 KEY = "value"
 FOO = "bar"
 ```
@@ -59,20 +56,10 @@ FOO = "bar"
 also `.secrets.toml`
 
 ```ini
-[default]
-TOKEN = "default"
-
-[production]
 TOKEN = "1234"
 ```
 
-The command will also create a `.env` setting the working environment to **[production]**
-
-```bash
-ENV_FOR_DYNACONF="PRODUCTION"
-```
-
-And will include the `.secrets.toml` in the `.gitignore`
+as well as `.gitignore` file ignoring the generated `.secrets.toml`
 
 ```ini
 # Ignore dynaconf secret files
@@ -81,10 +68,12 @@ And will include the `.secrets.toml` in the `.gitignore`
 
 > For sensitive data in production is recommended using [Vault Server](/secrets/)
 
-```
+```bash
 Usage: dynaconf init [OPTIONS]
 
-  Inits a dynaconf project By default it creates a settings.toml and a
+  Inits a dynaconf project.
+
+  By default it creates a settings.toml and a
   .secrets.toml for [default|development|staging|testing|production|global]
   envs.
 
@@ -93,24 +82,116 @@ Usage: dynaconf init [OPTIONS]
   This command must run on the project's root folder or you must pass
   --path=/myproject/root/folder.
 
-  If you want to have a .env created with the ENV defined there e.g:
-  `ENV_FOR_DYNACONF=production` just pass --env=production and then .env
-  will also be created and the env defined to production.
+  The --env/-e is deprecated (kept for compatibility but unused)
 
 Options:
   -f, --format [ini|toml|yaml|json|py|env]
   -p, --path TEXT                 defaults to current directory
   -e, --env TEXT                  Sets the working env in `.env` file
-  -v, --vars TEXT                 extra values to write to settings file file
-                                  e.g: `dynaconf init -v NAME=foo -v X=2
+  -v, --vars TEXT                 extra values to write to settings file e.g:
+                                  `dynaconf init -v NAME=foo -v X=2
+
   -s, --secrets TEXT              secret key values to be written in .secrets
                                   e.g: `dynaconf init -s TOKEN=kdslmflds
+
   --wg / --no-wg
   -y
   --django TEXT
   --help                          Show this message and exit.
+```
+
+Note that `-i`/`--instance` cannot be used with `init` as `-i` must point to an existing instance of the settings.
+
+
+### Dynaconf inspect (tech preview)
+
+> **NEW in 3.2.0**
+
+!!! warning
+    This feature is in **tech preview** the usage interface and output format is
+    subject to change.
+
+Inspect and dump data's loading history about a specific key or environment.
+
+It is also available as a [utility function](/advanced#inspecting-history).
 
 ```
+Usage: dynaconf inspect [OPTIONS]
+
+  Inspect the loading history of the given settings instance.
+
+  Filters by key and environement, otherwise shows all.
+
+Options:
+  -k, --key TEXT                  Filters result by key.
+  -e, --env TEXT                  Filters result by environment.
+  -f, --format [yaml|json|json-compact]
+                                  The output format.
+  -s, --old-first                 Invert history sorting to 'old-first'
+  -n, --limit INTEGER             Limits how many history entries are shown.
+  -a, --all                       Show dynaconf internal settings?
+  --help                          Show this message and exit.
+```
+
+
+Sample usage:
+
+```yaml
+>>> dynaconf -i app.settings inspect -k foo -f yaml -n 2
+header:
+  env_filter: 'foo'
+  key_filter: None
+  new_first: 'True'
+  history_limit: None
+  include_internal: 'False'
+current: from_environ
+history:
+- loader: yaml
+  identifier: file_a.yaml
+  env: default
+  merged: false
+  value:
+    FOO: from_yaml
+- loader: env_global
+  identifier: unique
+  env: global
+  merged: false
+  value:
+    FOO: from_environ
+    BAR: environ_only
+```
+
+To save to a file, use regular stream redirect methods:
+
+```bash
+$ dynaconf -i app.settings inspect -k foo -f yaml > dump.yaml
+```
+
+### Dynaconf get
+
+Get raw value for a single key
+
+```bash
+Usage: dynaconf get [OPTIONS] KEY
+
+  Returns the raw value for a settings key.
+
+  If result is a dict, list or tuple it is printes as a valid json string.
+
+Options:
+  -d, --default TEXT  Default value if settings doesn't exist
+  -e, --env TEXT      Filters the env to get the values
+  -u, --unparse       Unparse data by adding markers such as @none, @int etc..
+  --help              Show this message and exit.
+```
+
+Example:
+
+```bash
+export FOO=$(dynaconf get DATABASE_NAME -d 'default')
+```
+
+If the key doesn't exist and no default is provided it will exit with code 1.
 
 ### dynaconf list
 
@@ -119,8 +200,10 @@ List all defined parameters and optionally export to a json file.
 ```
 Usage: dynaconf list [OPTIONS]
 
-  Lists all user defined config values and if `--all` is passed it also
-  shows dynaconf internal variables.
+  Lists user defined settings or all (including internal configs).
+
+  By default, shows only user defined. If `--all` is passed it also shows
+  dynaconf internal variables aswell.
 
 Options:
   -e, --env TEXT     Filters the env to get the values
@@ -150,19 +233,22 @@ dynaconf list -o path/to/file.py --output-flat
 ### dynaconf write
 
 ```
-Usage: dynaconf write [OPTIONS] TO
+Usage: dynaconf write [OPTIONS] [ini|toml|yaml|json|py|redis|vault|env]
 
   Writes data to specific source
 
 Options:
-  -v, --vars TEXT     key values to be written e.g: `dynaconf write toml
-                      -e NAME=foo -e X=2
+  -v, --vars TEXT     key values to be written e.g: `dynaconf write toml -e
+                      NAME=foo -e X=2
+
   -s, --secrets TEXT  secret key values to be written in .secrets e.g:
                       `dynaconf write toml -s TOKEN=kdslmflds -s X=2
+
   -p, --path TEXT     defaults to current directory/settings.{ext}
   -e, --env TEXT      env to write to defaults to DEVELOPMENT for files for
                       external sources like Redis and Vault it will be
                       DYNACONF or the value set in $ENVVAR_PREFIX_FOR_DYNACONF
+
   -y
   --help              Show this message and exit.
 ```
@@ -227,5 +313,5 @@ $ dynaconf -i config.settings --banner
 ██████╔╝   ██║   ██║ ╚████║██║  ██║╚██████╗╚██████╔╝██║ ╚████║██║
 ╚═════╝    ╚═╝   ╚═╝  ╚═══╝╚═╝  ╚═╝ ╚═════╝ ╚═════╝ ╚═╝  ╚═══╝╚═╝
 
-Learn more at: http://github.com/rochacbruno/dynaconf
+Learn more at: http://github.com/dynaconf/dynaconf
 ```

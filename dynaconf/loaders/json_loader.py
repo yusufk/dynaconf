@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import io
 import json
 from pathlib import Path
@@ -14,7 +16,7 @@ except ImportError:  # pragma: no cover
     commentjson = None
 
 
-def load(obj, env=None, silent=True, key=None, filename=None):
+def load(obj, env=None, silent=True, key=None, filename=None, validate=False):
     """
     Reads and loads in to "obj" a single key or all keys from source file.
 
@@ -41,8 +43,13 @@ def load(obj, env=None, silent=True, key=None, filename=None):
         extensions=JSON_EXTENSIONS,
         file_reader=file_reader,
         string_reader=string_reader,
+        validate=validate,
     )
-    loader.load(filename=filename, key=key, silent=silent)
+    loader.load(
+        filename=filename,
+        key=key,
+        silent=silent,
+    )
 
 
 def write(settings_path, settings_data, merge=True):
@@ -54,12 +61,12 @@ def write(settings_path, settings_data, merge=True):
     """
     settings_path = Path(settings_path)
     if settings_path.exists() and merge:  # pragma: no cover
-        with io.open(
+        with open(
             str(settings_path), encoding=default_settings.ENCODING_FOR_DYNACONF
         ) as open_file:
             object_merge(json.load(open_file), settings_data)
 
-    with io.open(
+    with open(
         str(settings_path),
         "w",
         encoding=default_settings.ENCODING_FOR_DYNACONF,

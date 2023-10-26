@@ -1,9 +1,9 @@
 """Dynaconf django extension
 
-In the `django_project/settings.py` put at the very botton of the file:
+In the `django_project/settings.py` put at the very bottom of the file:
 
 # HERE STARTS DYNACONF EXTENSION LOAD (Keep at the very bottom of settings.py)
-# Read more at https://dynaconf.readthedocs.io/en/latest/guides/django.html
+# Read more at https://www.dynaconf.com/django/
 import dynaconf  # noqa
 settings = dynaconf.DjangoDynaconf(__name__)  # noqa
 # HERE ENDS DYNACONF EXTENSION LOAD (No more code below this line)
@@ -20,11 +20,14 @@ On your projects root folder now you can start as::
     DJANGO_ALLOWED_HOSTS='["localhost"]' \
     python manage.py runserver
 """
+from __future__ import annotations
+
 import inspect
 import os
 import sys
 
 import dynaconf
+from dynaconf.hooking import HookableSettings
 
 try:  # pragma: no cover
     from django import conf
@@ -49,12 +52,15 @@ def load(django_settings_module_name=None, **kwargs):  # pragma: no cover
             os.environ["DJANGO_SETTINGS_MODULE"]
         ]
 
+    settings_module_name = django_settings_module.__name__
     settings_file = os.path.abspath(django_settings_module.__file__)
     _root_path = os.path.dirname(settings_file)
 
     # 1) Create the lazy settings object reusing settings_module consts
     options = {
-        k: v for k, v in django_settings_module.__dict__.items() if k.isupper()
+        k.upper(): v
+        for k, v in django_settings_module.__dict__.items()
+        if k.isupper()
     }
     options.update(kwargs)
     options.setdefault(
@@ -68,6 +74,10 @@ def load(django_settings_module_name=None, **kwargs):  # pragma: no cover
     options.setdefault(
         "default_settings_paths", dynaconf.DEFAULT_SETTINGS_FILES
     )
+    options.setdefault("_wrapper_class", HookableSettings)
+
+    class UserSettingsHolder(dynaconf.LazySettings):
+        _django_override = True
 
     lazy_settings = dynaconf.LazySettings(**options)
     dynaconf.settings = lazy_settings  # rebind the settings
@@ -92,6 +102,16 @@ def load(django_settings_module_name=None, **kwargs):  # pragma: no cover
 
     lazy_settings.update(dj)
 
+    # Allow dynaconf_hooks to be in the same folder as the django.settings
+    dynaconf.loaders.execute_hooks(
+        "post",
+        lazy_settings,
+        lazy_settings.current_env,
+        modules=[settings_module_name],
+        files=[settings_file],
+    )
+    lazy_settings._loaded_py_modules.insert(0, settings_module_name)
+
     # 5) Patch django.conf.settings
     class Wrapper:
 
@@ -100,6 +120,8 @@ def load(django_settings_module_name=None, **kwargs):  # pragma: no cover
         def __getattribute__(self, name):
             if name == "settings":
                 return lazy_settings
+            if name == "UserSettingsHolder":
+                return UserSettingsHolder
             return getattr(conf, name)
 
     # This implementation is recommended by Guido Van Rossum

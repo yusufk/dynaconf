@@ -1,9 +1,13 @@
+from __future__ import annotations
+
 import io
 import warnings
+from typing import NamedTuple
 
 from dynaconf.utils import build_env_list
 from dynaconf.utils import ensure_a_list
 from dynaconf.utils import upperfy
+from dynaconf.utils.functional import empty
 
 
 class BaseLoader:
@@ -19,7 +23,15 @@ class BaseLoader:
     """
 
     def __init__(
-        self, obj, env, identifier, extensions, file_reader, string_reader
+        self,
+        obj,
+        env,
+        identifier,
+        extensions,
+        file_reader,
+        string_reader,
+        opener_params=None,
+        validate=False,
     ):
         """Instantiates a loader for different sources"""
         self.obj = obj
@@ -28,6 +40,11 @@ class BaseLoader:
         self.extensions = extensions
         self.file_reader = file_reader
         self.string_reader = string_reader
+        self.opener_params = opener_params or {
+            "mode": "r",
+            "encoding": obj.get("ENCODING_FOR_DYNACONF", "utf-8"),
+        }
+        self.validate = validate
 
     @staticmethod
     def warn_not_installed(obj, identifier):  # pragma: no cover
@@ -38,14 +55,15 @@ class BaseLoader:
             )
         obj._not_installed_warnings.append(identifier)
 
-    def load(self, filename=None, key=None, silent=True):
+    def load(self, filename=None, key=None, silent=True, merge=empty):
         """
         Reads and loads in to `self.obj` a single key or all keys from source
 
         :param filename: Optional filename to load
         :param key: if provided load a single key
-        :param silent: if load erros should be silenced
+        :param silent: if load errors should be silenced
         """
+
         filename = filename or self.obj.get(self.identifier.upper())
         if not filename:
             return
@@ -74,17 +92,12 @@ class BaseLoader:
         for source_file in files:
             if source_file.endswith(self.extensions):
                 try:
-                    with io.open(
-                        source_file,
-                        encoding=self.obj.get(
-                            "ENCODING_FOR_DYNACONF", "utf-8"
-                        ),
-                    ) as open_file:
+                    with open(source_file, **self.opener_params) as open_file:
                         content = self.file_reader(open_file)
                         self.obj._loaded_files.append(source_file)
                         if content:
                             data[source_file] = content
-                except IOError as e:
+                except OSError as e:
                     if ".local." not in source_file:
                         warnings.warn(
                             f"{self.identifier}_loader: {source_file} "
@@ -99,23 +112,51 @@ class BaseLoader:
 
     def _envless_load(self, source_data, silent=True, key=None):
         """Load all the keys from each file without env separation"""
-        for file_data in source_data.values():
-            self._set_data_to_obj(file_data, self.identifier, key=key)
+        for file_name, file_data in source_data.items():
+            # is there a `dynaconf_merge` on top level of file?
+            file_merge = file_data.get("dynaconf_merge", empty)
+
+            # set source metadata
+            source_metadata = SourceMetadata(
+                self.identifier, file_name, "default"
+            )
+
+            self._set_data_to_obj(
+                file_data,
+                source_metadata,
+                file_merge=file_merge,
+                key=key,
+            )
 
     def _load_all_envs(self, source_data, silent=True, key=None):
-        """Load configs from files separating by each environment"""
-
-        for file_data in source_data.values():
-
+        """
+        Load configs from files separating by each environment
+        source_data should have format:
+            {
+                "path/to/src": {
+                    "env": {...},
+                    "env2": {...}
+                }
+            }
+        """
+        for file_name, file_data in source_data.items():
             # env name is checked in lower
             file_data = {k.lower(): value for k, value in file_data.items()}
 
             # is there a `dynaconf_merge` on top level of file?
-            file_merge = file_data.get("dynaconf_merge")
+            file_merge = file_data.get("dynaconf_merge", empty)
+
+            # is there a flag disabling dotted lookup on file?
+            file_dotted_lookup = file_data.get("dynaconf_dotted_lookup")
 
             for env in build_env_list(self.obj, self.env):
                 env = env.lower()  # lower for better comparison
-                data = {}
+                # print(self.env, file_data)
+
+                # set source metadata
+                source_metadata = SourceMetadata(
+                    self.identifier, file_name, env
+                )
 
                 try:
                     data = file_data[env] or {}
@@ -127,35 +168,51 @@ class BaseLoader:
                 if not data:
                     continue
 
-                if env != self.obj.get("DEFAULT_ENV_FOR_DYNACONF").lower():
-                    identifier = f"{self.identifier}_{env}"
-                else:
-                    identifier = self.identifier
-
-                self._set_data_to_obj(data, identifier, file_merge, key)
+                self._set_data_to_obj(
+                    data,
+                    source_metadata,
+                    file_merge,
+                    key,
+                    file_dotted_lookup=file_dotted_lookup,
+                )
 
     def _set_data_to_obj(
         self,
         data,
-        identifier,
-        file_merge=None,
+        identifier: SourceMetadata,
+        file_merge=empty,
         key=False,
+        file_dotted_lookup=None,
     ):
-        """Calls setttings.set to add the keys"""
-
+        """Calls settings.set to add the keys"""
         # data 1st level keys should be transformed to upper case.
         data = {upperfy(k): v for k, v in data.items()}
         if key:
             key = upperfy(key)
 
+        if self.obj.filter_strategy:
+            data = self.obj.filter_strategy(data)
+
         # is there a `dynaconf_merge` inside an `[env]`?
-        file_merge = file_merge or data.pop("DYNACONF_MERGE", False)
+        env_scope_merge = data.pop("DYNACONF_MERGE", None)
+        if env_scope_merge is not None:
+            file_merge = env_scope_merge
+
+        # If not passed or passed as None,
+        # look for inner [env] value, or default settings.
+        if file_dotted_lookup is None:
+            file_dotted_lookup = data.pop(
+                "DYNACONF_DOTTED_LOOKUP",
+                self.obj.get("DOTTED_LOOKUP_FOR_DYNACONF"),
+            )
 
         if not key:
             self.obj.update(
                 data,
                 loader_identifier=identifier,
                 merge=file_merge,
+                dotted_lookup=file_dotted_lookup,
+                validate=self.validate,
             )
         elif key in data:
             self.obj.set(
@@ -163,4 +220,24 @@ class BaseLoader:
                 data.get(key),
                 loader_identifier=identifier,
                 merge=file_merge,
+                dotted_lookup=file_dotted_lookup,
+                validate=self.validate,
             )
+
+
+class SourceMetadata(NamedTuple):
+    """
+    Usefull metadata about some loaded source (file, envvar, etc).
+
+    Serve as a unique identifier for data from a specific env
+    and a specific source (file, envvar, validationd default, etc)
+
+    Examples:
+        SourceMetadata(loader="envvar", identifier="os", env="global")
+        SourceMetadata(loader="yaml", identifier="path/to/file.yml", env="dev")
+    """
+
+    loader: str
+    identifier: str
+    env: str = "global"
+    merged: bool = False

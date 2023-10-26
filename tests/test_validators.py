@@ -1,10 +1,15 @@
+from __future__ import annotations
+
+import os
 from types import MappingProxyType
 
 import pytest
 
+from dynaconf import Dynaconf
 from dynaconf import LazySettings
 from dynaconf import ValidationError
 from dynaconf import Validator
+from dynaconf.validator import ValidatorList
 
 
 TOML = """
@@ -61,6 +66,12 @@ app:
         arg1: "a"
         arg2: "b"
         arg3: "c"
+
+hasemptyvalues:
+    key1:
+    key2:
+    key3: null
+    key4: "@empty"
 """
 
 
@@ -363,6 +374,36 @@ def test_validator_custom_message(tmpdir):
     ) in str(error)
 
 
+def test_validate_all(tmpdir):
+    """Assert custom message is being processed by validator."""
+    tmpfile = tmpdir.join("settings.toml")
+    tmpfile.write(TOML)
+
+    settings = LazySettings(
+        environments=True, SETTINGS_FILE_FOR_DYNACONF=str(tmpfile), silent=True
+    )
+
+    custom_msg = "You cannot set {name} to {value} in env {env}"
+    settings.validators.register(
+        Validator("MYSQL_HOST", eq="development.com", env="DEVELOPMENT"),
+        Validator("MYSQL_HOST", ne="development.com", env="PRODUCTION"),
+        Validator("VERSION", ne=1, messages={"operations": custom_msg}),
+        Validator("BLABLABLA", must_exist=True),
+    )
+
+    with pytest.raises(ValidationError) as error:
+        settings.validators.validate_all()
+
+    assert (
+        custom_msg.format(name="VERSION", value="1", env="DEVELOPMENT")
+        in error.value.message
+    )
+    assert "BLABLABLA" in error.value.message
+
+    assert error.type == ValidationError
+    assert len(error.value.details) == 2
+
+
 def test_validator_subclass_messages(tmpdir):
     """Assert message can be customized via class attributes"""
     tmpfile = tmpdir.join("settings.toml")
@@ -489,7 +530,7 @@ def test_envless_and_combined_validators(tmpdir):
         settings.validators.validate()
 
 
-def test_cast_before_validate(tmpdir):
+def test_cast_on_validate_transforms_value(tmpdir):
     tmpfile = tmpdir.join("settings.toml")
     TOML = """
     name = 'Bruno'
@@ -501,16 +542,20 @@ def test_cast_before_validate(tmpdir):
         silent=True,
         lowercase_read=True,
         validators=[
+            # Order matters here
             Validator("name", len_eq=5),
             Validator("name", len_min=1),
             Validator("name", len_max=5),
+            # This will cast the str to list
+            Validator("name", cast=list),
             Validator("colors", len_eq=3),
             Validator("colors", len_eq=3),
+            # this will cast the list to str
             Validator("colors", len_eq=24, cast=str),
         ],
     )
-    assert settings.name == "Bruno"
-    assert settings.colors == ["red", "green", "blue"]
+    assert settings.name == list("Bruno")
+    assert settings.colors == str(["red", "green", "blue"])
 
 
 def test_validator_can_provide_default(tmpdir):
@@ -604,6 +649,36 @@ def test_validator_exclude_post_register(
     settings.app.path = "/tmp/app_startup"
 
 
+def test_validator_only_current_env_valid(tmpdir):
+    tmpfile = tmpdir.join("settings.toml")
+    tmpfile.write(TOML)
+    settings = LazySettings(
+        settings_file=str(tmpfile),
+        environments=True,
+        ENV_FOR_DYNACONF="DEVELOPMENT",
+    )
+    settings.validators.register(
+        Validator("IMAGE_1", env="production", must_exist=True)
+    )
+    settings.validators.validate(only_current_env=True)
+
+
+def test_raises_only_current_env_invalid(tmpdir):
+    tmpfile = tmpdir.join("settings.toml")
+    tmpfile.write(TOML)
+    settings = LazySettings(
+        settings_file=str(tmpfile),
+        environments=True,
+        ENV_FOR_DYNACONF="PRODUCTION",
+    )
+    settings.validators.register(
+        Validator("IMAGE_1", env="production", must_exist=True)
+    )
+
+    with pytest.raises(ValidationError):
+        settings.validators.validate(only_current_env=True)
+
+
 def test_raises_on_invalid_selective_args(tmpdir, yaml_validators_good):
     settings = LazySettings(validators=yaml_validators_good, validate_only=int)
     with pytest.raises(ValueError):
@@ -614,3 +689,202 @@ def test_raises_on_invalid_selective_args(tmpdir, yaml_validators_good):
     )
     with pytest.raises(ValueError):
         settings.validator_instance.validate()
+
+
+def test_validator_descriptions(tmpdir):
+    validators = ValidatorList(
+        LazySettings(),
+        validators=[
+            Validator("foo", description="foo"),
+            Validator("bar", description="bar"),
+            Validator("baz", "zaz", description="baz zaz"),
+            Validator("foo", description="another message"),
+            Validator("a", description="a") & Validator("b"),
+        ],
+    )
+
+    assert validators.descriptions() == {
+        "bar": ["bar"],
+        "baz": ["baz zaz"],
+        "zaz": ["baz zaz"],
+        "foo": ["foo", "another message"],
+        "a": ["a"],
+        "b": ["a"],
+    }
+
+
+def test_validator_descriptions_flat(tmpdir):
+    validators = ValidatorList(
+        LazySettings(),
+        validators=[
+            Validator("foo", description="foo"),
+            Validator("bar", description="bar"),
+            Validator("baz", "zaz", description="baz zaz"),
+            Validator("foo", description="another message"),
+            Validator("a", description="a") & Validator("b"),
+        ],
+    )
+
+    assert validators.descriptions(flat=True) == {
+        "bar": "bar",
+        "baz": "baz zaz",
+        "zaz": "baz zaz",
+        "foo": "foo",
+        "a": "a",
+        "b": "a",
+    }
+
+
+def test_toml_should_not_change_validator_type_with_is_type_set():
+    settings = Dynaconf(
+        validators=[Validator("TEST", is_type_of=str, default="+172800")]
+    )
+
+    assert settings.test == "+172800"
+
+
+def test_toml_should_not_change_validator_type_with_is_type_not_set_int():
+    settings = Dynaconf(
+        validators=[Validator("TEST", default="+172800")]
+        # The ways to force a string is
+        # passing is_type_of=str
+        # or default="@str +172800" or default="'+172800'"
+    )
+
+    assert settings.test == +172800
+
+
+def test_toml_should_not_change_validator_type_using_at_sign():
+    settings = Dynaconf(
+        validators=[Validator("TEST", is_type_of=str, default="@str +172800")]
+    )
+
+    assert settings.test == "+172800"
+
+
+def test_default_eq_env_lvl_1():
+    """Tests when the env value equals the default value."""
+    VAR_NAME = "test"
+    ENV = "DYNATESTRUN_TEST"
+    settings = Dynaconf(
+        environments=False,
+        envvar_prefix="DYNATESTRUN",
+        validators=[
+            Validator(
+                VAR_NAME,
+                default=True,
+                is_type_of=bool,
+            ),
+        ],
+    )
+    os.environ[ENV] = "true"
+    assert settings.test is True
+    del os.environ[ENV]
+
+
+def test_default_lvl_1():
+    """Tests if the default works properly without any nested level.
+
+    Uses different values for the default and the environment variable.
+    """
+    VAR_NAME = "test"
+    ENV = "DYNATESTRUN_TEST"
+    settings = Dynaconf(
+        environments=False,
+        envvar_prefix="DYNATESTRUN",
+        validators=[
+            Validator(
+                VAR_NAME,
+                default=True,
+                is_type_of=bool,
+            ),
+        ],
+    )
+    os.environ[ENV] = "false"
+    assert settings.test is False
+    del os.environ[ENV]
+
+
+def test_default_lvl_2():
+    """Tests if the default works properly with one nested level.
+
+    Uses different values for the default and the environment variable.
+    """
+    VAR_NAME = "nested.test"
+    ENV = "DYNATESTRUN_NESTED__TEST"
+    settings = Dynaconf(
+        environments=False,
+        envvar_prefix="DYNATESTRUN",
+        validators=[
+            Validator(
+                VAR_NAME,
+                default=True,
+                is_type_of=bool,
+            ),
+        ],
+    )
+    os.environ[ENV] = "false"
+    assert settings.nested.test is False
+    del os.environ[ENV]
+
+
+def test_use_default_value_when_yaml_is_empty_and_explicitly_marked(tmpdir):
+    tmpfile = tmpdir.join("settings.yaml")
+    tmpfile.write(YAML)
+    settings = Dynaconf(
+        settings_file=str(tmpfile),
+        validators=[
+            # Explicitly say thar default must be applied to None
+            Validator(
+                "hasemptyvalues.key1",
+                default="value1",
+                apply_default_on_none=True,
+            ),
+            # The following 2 defaults must be ignored
+            Validator("hasemptyvalues.key2", default="value2"),
+            Validator("hasemptyvalues.key3", default="value3"),
+            # This one must be set because on YAML key is set to `@empty`
+            Validator("hasemptyvalues.key4", default="value4"),
+        ],
+    )
+    assert settings.hasemptyvalues.key1 == "value1"
+    assert settings.hasemptyvalues.key2 is None
+    assert settings.hasemptyvalues.key3 is None
+    assert settings.hasemptyvalues.key4 == "value4"
+
+
+def test_ensure_cast_happens_after_must_exist(tmpdir):
+    """#823"""
+    from pathlib import Path
+
+    settings = Dynaconf(
+        validators=[Validator("java_bin", must_exist=True, cast=Path)]
+    )
+    # must raise ValidationError instead of Path error
+    with pytest.raises(ValidationError):
+        settings.validators.validate()
+
+
+def test_ensure_cast_works_for_non_default_values(tmpdir):
+    """#834"""
+
+    settings = Dynaconf(validators=[Validator("offset", default=1, cast=int)])
+
+    settings.offset = "24"
+
+    settings.validators.validate()
+
+    assert isinstance(settings.offset, int), type(settings.offset)
+
+
+def test_is_type_of__raises__with_type_error():
+    """
+    When invalid type is given to is_type_of,
+    should raise ValidationError
+    """
+    settings = Dynaconf(
+        validators=[Validator("ENV_FOR_DYNACONF", is_type_of="invalid")]
+    )
+
+    with pytest.raises(ValidationError):
+        settings.validators.validate()
